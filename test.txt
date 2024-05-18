@@ -1,0 +1,15 @@
+#@!START-ESC
+ *******   *******   ****   **** 
+/**////** /**////** */// * *///**
+/**   /** /**   /**/*   /*/*  */*
+/*******  /******* / **** /* * /*
+/**///**  /**////   */// */**  /*
+/**  //** /**      /*   /*/*   /*
+/**   //**/**      / **** / **** 
+//     // //        ////   ////  
+#@!BOLD1Universal USB Point Of Sales
+Thermal Printer Driver v1.0.0#@!BOLD0
+By Filip Rusz <filip@rusz.space>
+#@!UNDER1PS: Sorry for all the paper!#@!UNDER0
+
+#@!CUT
