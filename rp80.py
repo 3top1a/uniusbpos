@@ -3,106 +3,86 @@ import usb
 import sys
 import signal
 import codecs
+from typing import Optional
 
 print("Universal USB Point Of Sales Thermal Printer Driver")
 print("By Filip Rusz <USR filip DOMAIN rusz TLD space>")
 
-# Assumes device is 0fe6:811e
-dev = usb.core.find(idVendor=0x0fe6, idProduct=0x811e)
-if dev is None:
-    print("Could not find device!")
-    sys.exit(1)
+def find_device_by_id(idVendor: int, idProduct: int) -> usb.core.Device:
+    dev = usb.core.find(idVendor=idVendor, idProduct=idProduct)
+    assert dev is not None, "Could not find device!"
+    return dev
 
-# Detach from kernel
-needs_reattach = False
-if dev.is_kernel_driver_active(0):
-    needs_reattach = True
-    dev.detach_kernel_driver(0)
+def configure_device_get_endpoint(dev: usb.core.Device) -> usb.core.Endpoint:
+    if dev.is_kernel_driver_active(0):
+        dev.detach_kernel_driver(0)
+    dev.set_configuration()
+    cfg = dev.get_active_configuration()
+    intf = cfg[(0, 0)]
+    ep = usb.util.find_descriptor(
+        intf,
+        custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
+    )
+    assert ep is not None, "Could not get a valid bulk out endpoint!"
+    return ep
 
-dev.set_configuration()
-
-cfg = dev.get_active_configuration()
-intf = cfg[(0,0)]
-
-ep = usb.util.find_descriptor(
-    intf,
-    # match the first OUT endpoint
-    custom_match = \
-    lambda e: \
-        usb.util.endpoint_direction(e.bEndpointAddress) == \
-        usb.util.ENDPOINT_OUT)
-
-if ep is None:
-    print("Could not get a valid bulk out endpoint!")
-    sys.exit(1)
-
-def quit(sig, frame):
-    # Free dev to kernel
+def quit_program(sig, frame, dev: usb.core.Device) -> None:
     dev.reset()
-    if needs_reattach:
+    if dev.is_kernel_driver_active(0):
         dev.attach_kernel_driver(0)
     sys.exit(0)
-# Bind so that the device gets freed
-signal.signal(signal.SIGINT, quit)
 
-# ESC constants
-ESC = b'\x1b'
-GS = b'\x1d'
-LF = b'\x0a'
-CR = b'\x0d'
-BEL = b'\x07'
-NUL = b'\x00'
+def replace_ascii_consts(data: bytes) -> bytes:
+    replacements = {
+        b'ESC': b'\x1b',
+        b'GS': b'\x1d',
+        b'LF': b'\x0a',
+        b'CR': b'\x0d',
+        b'BEL': b'\x07',
+        b'NUL': b'\x00',
+        b'#@!BOLD1': b'\x1bE1',
+        b'#@!BOLD0': b'\x1bE0',
+        b'#@!UNDER1': b'\x1b!\x80',
+        b'#@!UNDER0': b'\x1b!\x00',
+        b'#@!DOUBLEW': b'\x1b!\x20',
+        b'#@!NORMALW': b'\x1b!\x00',
+        b'#@!PAPERW80': b'\x1dW\x80\x02',
+        b'#@!PAPERW40': b'\x1dW\x40\x01',
+        b'#@!BACK': b'\x1bj\x48',
+        b'#@!CUT': b'\n\n\n\x1dV\x00\n\n\n' # There is a three line distance between cutter and printing part
+    }
+    for k, v in replacements.items():
+        data = data.replace(k, v)
+    return data
 
-def replace_ascii_consts(i: bytes) -> bytes:
-    i = i.replace(b'ESC', ESC)
-    i = i.replace(b'GS', GS)
-    i = i.replace(b'LF', LF)
-    i = i.replace(b'CR', CR)
-    i = i.replace(b'BEL', BEL)
-    i = i.replace(b'NUL', NUL)
-    i = i.replace(b'\\ ', b' ')
-    i = i.replace(b'#@!BOLD1', ESC + b'E1')
-    i = i.replace(b'#@!BOLD0', ESC + b'E0')
-    i = i.replace(b'#@!UNDER1', ESC + b'!\x80')
-    i = i.replace(b'#@!UNDER0', ESC + b'!\x00')
-    i = i.replace(b'#@!DOUBLEW', ESC + b'!\x20')
-    i = i.replace(b'#@!NORMALW', ESC + b'!\x00')
-    i = i.replace(b'#@!PAPERW80', GS + b'W\x80\x02')
-    i = i.replace(b'#@!PAPERW40', GS + b'W\x40\x01')
-    i = i.replace(b'#@!BACK', ESC + b'j\x48')
-
-    return i
-
-try:
+def process_input(ep: usb.core.Endpoint, dev: usb.core.Device) -> None:
     esc = False
-    bold = False
-    while True:
-        i = input()
+    try:
+        while True:
+            i = input()
+            if i == "#@!START-ESC":
+                esc = True
+                ep.write(b'\x1b@')
+                print("ESC mode enabled!")
+                continue
 
-        if i == "#@!START-ESC":
-            esc = True
-            ep.write(ESC + b'@')
-            print("ESC mode enabled!")
-            continue
-        elif esc and i == "#@!CUT":
-            ep.write('\n\n\n') # There is a three line distance between cutter and printing part
-            ep.write(GS + b'V\x00')
-            ep.write('\n\n\n')
-            continue
+            if esc:
+                i = replace_ascii_consts(bytes(codecs.decode(i, 'unicode_escape'), 'utf8'))
+            else:
+                i = bytes(i, 'utf8')
 
-        # Convert to bytes for easier byte mucking about
+            ep.write(i + b"\n")
 
-        if esc:
-            i = replace_ascii_consts(bytes(codecs.decode(i, 'unicode_escape'), 'utf8'))
-        else:
-            i = bytes(i, 'utf8')
+    except EOFError:
+        quit_program(None, None, dev)
+    except Exception as e:
+        print(f"Exception: {e}")
+        quit_program(None, None, dev)
 
-        # encode i
-        ep.write(i + b"\n")
-
-except EOFError:
-    quit(None, None)
-
-except Exception as e:
-    print(f"Exception: {e}")
-    quit(None, None)
+if __name__ == "__main__":
+    # Main execution
+    dev = find_device_by_id(idVendor=0x0fe6, idProduct=0x811e)
+    ep = configure_device_get_endpoint(dev)
+    signal.signal(signal.SIGINT, lambda sig, frame: quit_program(sig, frame, dev))
+    process_input(ep, dev)
+    quit_program(None, None, dev)
